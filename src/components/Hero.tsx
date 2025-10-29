@@ -36,12 +36,12 @@ export const Hero = () => {
             </p>
             
             <div className="flex flex-wrap gap-4">
-              <Button variant="hero" size="lg" className="group">
+              <Button variant="hero" size="lg" className="group" onClick={() => window.location.href = '/auth'}>
                 Démarrer gratuitement
                 <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
               </Button>
-              <Button variant="outline" size="lg">
-                Voir la démo
+              <Button variant="outline" size="lg" onClick={() => window.location.href = '/dashboard'}>
+                Tableau de bord
               </Button>
             </div>
             
