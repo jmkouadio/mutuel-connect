@@ -11,14 +11,21 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Plus, Settings } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { useUserRole } from "@/hooks/useUserRole";
+import { useAuth } from "@/hooks/useAuth";
 
 const Contributions = () => {
+  const { user } = useAuth();
+  const { role, mutuelleId, memberId, loading: roleLoading } = useUserRole();
   const [configs, setConfigs] = useState<any[]>([]);
   const [contributions, setContributions] = useState<any[]>([]);
   const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
+
+  const isAdmin = role === 'super_admin' || role === 'admin';
+  const isMember = role === 'member';
 
   const [configFormData, setConfigFormData] = useState({
     name: "",
@@ -35,20 +42,50 @@ const Contributions = () => {
   });
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    if (!roleLoading && mutuelleId) {
+      fetchData();
+    }
+  }, [roleLoading, mutuelleId, memberId]);
 
   const fetchData = async () => {
+    if (roleLoading || !mutuelleId) return;
+
     try {
-      const [configsRes, contribsRes, membersRes] = await Promise.all([
-        supabase.from("contribution_configs").select("*").eq("is_active", true),
-        supabase.from("contributions").select("*, members(full_name), contribution_configs(name)").order("created_at", { ascending: false }),
-        supabase.from("members").select("*").eq("status", "active"),
-      ]);
+      // Fetch configs for the mutuelle
+      const configsRes = await supabase
+        .from("contribution_configs")
+        .select("*")
+        .eq("is_active", true)
+        .eq("mutuelle_id", mutuelleId);
+
+      // Fetch contributions based on role
+      let contribsQuery = supabase
+        .from("contributions")
+        .select("*, members(full_name), contribution_configs(name)")
+        .eq("mutuelle_id", mutuelleId)
+        .order("created_at", { ascending: false });
+
+      // If member, only show their own contributions
+      if (isMember && memberId) {
+        contribsQuery = contribsQuery.eq("member_id", memberId);
+      }
+
+      const contribsRes = await contribsQuery;
+
+      // Fetch members (for admins to create payments for others)
+      let membersData: any[] = [];
+      if (isAdmin) {
+        const membersRes = await supabase
+          .from("members")
+          .select("*")
+          .eq("status", "active")
+          .eq("mutuelle_id", mutuelleId);
+        membersData = membersRes.data || [];
+      }
 
       setConfigs(configsRes.data || []);
       setContributions(contribsRes.data || []);
-      setMembers(membersRes.data || []);
+      setMembers(membersData);
     } catch (error: any) {
       toast.error("Erreur lors du chargement des données");
       console.error(error);
@@ -99,14 +136,16 @@ const Contributions = () => {
     e.preventDefault();
     
     try {
-      const { data: mutuelles } = await supabase
-        .from("mutuelles")
-        .select("id")
-        .limit(1)
-        .single();
-
-      if (!mutuelles) {
+      if (!mutuelleId) {
         toast.error("Aucune mutuelle trouvée");
+        return;
+      }
+
+      // Determine the member_id: if user is a member, use their member_id, otherwise use selected member
+      const targetMemberId = isMember && memberId ? memberId : paymentFormData.member_id;
+
+      if (!targetMemberId) {
+        toast.error("Membre non trouvé");
         return;
       }
 
@@ -114,9 +153,10 @@ const Contributions = () => {
       const { data: contribution, error: contributionError } = await supabase
         .from("contributions")
         .insert([{
-          ...paymentFormData,
+          member_id: targetMemberId,
+          config_id: paymentFormData.config_id,
           amount: parseFloat(paymentFormData.amount),
-          mutuelle_id: mutuelles.id,
+          mutuelle_id: mutuelleId,
           status: "pending",
         }])
         .select()
@@ -125,7 +165,12 @@ const Contributions = () => {
       if (contributionError) throw contributionError;
 
       // Get member email
-      const member = members.find(m => m.id === paymentFormData.member_id);
+      const { data: member } = await supabase
+        .from("members")
+        .select("email")
+        .eq("id", targetMemberId)
+        .single();
+
       if (!member || !member.email) {
         toast.error("Email du membre introuvable");
         return;
@@ -140,7 +185,7 @@ const Contributions = () => {
             email: member.email,
             metadata: {
               contribution_id: contribution.id,
-              member_id: member.id,
+              member_id: targetMemberId,
             },
           },
         }
@@ -156,7 +201,7 @@ const Contributions = () => {
       setPaymentDialogOpen(false);
       setPaymentFormData({ member_id: "", config_id: "", amount: "" });
     } catch (error: any) {
-      toast.error(error.message || "Erreur lors de l'initialisation du paiement");
+      toast.error("Erreur lors de l'initialisation du paiement");
       console.error(error);
     }
   };
@@ -174,10 +219,12 @@ const Contributions = () => {
         </div>
 
         <Tabs defaultValue="payments">
-          <TabsList>
-            <TabsTrigger value="payments">Paiements</TabsTrigger>
-            <TabsTrigger value="configs">Configuration</TabsTrigger>
-          </TabsList>
+          {isAdmin && (
+            <TabsList>
+              <TabsTrigger value="payments">Paiements</TabsTrigger>
+              <TabsTrigger value="configs">Configuration</TabsTrigger>
+            </TabsList>
+          )}
 
           <TabsContent value="payments" className="space-y-4">
             <div className="flex justify-end">
@@ -193,25 +240,27 @@ const Contributions = () => {
                     <DialogTitle>Créer une cotisation</DialogTitle>
                   </DialogHeader>
                   <form onSubmit={handlePaymentSubmit} className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="member">Membre *</Label>
-                      <Select
-                        value={paymentFormData.member_id}
-                        onValueChange={(value) => setPaymentFormData({ ...paymentFormData, member_id: value })}
-                        required
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Sélectionner un membre" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {members.map((member) => (
-                            <SelectItem key={member.id} value={member.id}>
-                              {member.full_name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+                    {isAdmin && (
+                      <div className="space-y-2">
+                        <Label htmlFor="member">Membre *</Label>
+                        <Select
+                          value={paymentFormData.member_id}
+                          onValueChange={(value) => setPaymentFormData({ ...paymentFormData, member_id: value })}
+                          required
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Sélectionner un membre" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {members.map((member) => (
+                              <SelectItem key={member.id} value={member.id}>
+                                {member.full_name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
                     <div className="space-y-2">
                       <Label htmlFor="config">Type de cotisation *</Label>
                       <Select
@@ -307,15 +356,16 @@ const Contributions = () => {
             </Card>
           </TabsContent>
 
-          <TabsContent value="configs" className="space-y-4">
-            <div className="flex justify-end">
-              <Dialog open={configDialogOpen} onOpenChange={setConfigDialogOpen}>
-                <DialogTrigger asChild>
-                  <Button>
-                    <Settings className="w-4 h-4 mr-2" />
-                    Nouveau type
-                  </Button>
-                </DialogTrigger>
+          {isAdmin && (
+            <TabsContent value="configs" className="space-y-4">
+              <div className="flex justify-end">
+                <Dialog open={configDialogOpen} onOpenChange={setConfigDialogOpen}>
+                  <DialogTrigger asChild>
+                    <Button>
+                      <Settings className="w-4 h-4 mr-2" />
+                      Nouveau type
+                    </Button>
+                  </DialogTrigger>
                 <DialogContent>
                   <DialogHeader>
                     <DialogTitle>Créer un type de cotisation</DialogTitle>
@@ -426,6 +476,7 @@ const Contributions = () => {
               </CardContent>
             </Card>
           </TabsContent>
+          )}
         </Tabs>
       </div>
     </DashboardLayout>
